@@ -2,11 +2,12 @@ package matching
 
 import akka.actor.ActorSystem
 import akka.testkit.{TestKit, TestProbe}
-import matching.ClientsPrinter.PrintMessage
-import matching.Exchange.{AddClient, AddOrder, PrintClients}
+import matching.protocol.Exchange.{AddClient, AddOrder, GetAllClientsStates}
+import matching.protocol._
 import org.scalatest.{BeforeAndAfterAll, FlatSpecLike, Matchers}
 
 import scala.concurrent.duration._
+import scala.language.postfixOps
 
 class MatchingSpec(_system: ActorSystem) extends TestKit(_system)
   with Matchers
@@ -22,12 +23,12 @@ class MatchingSpec(_system: ActorSystem) extends TestKit(_system)
   /**
     * Тестирует [[Exchange]] актор
     */
-  "An Exchange Actor" should "have valid balances" in {
+  "An Exchange Clients" should "have valid balances" in {
 
     val clients = Seq(
-      Client("C1", 100, Map("A" -> 10, "B" -> 20, "C" -> 30, "D" -> 40)),
-      Client("C2", 200, Map("A" -> 40, "B" -> 30, "C" -> 20, "D" -> 10)),
-      Client("C3", 300, Map("A" -> 50, "B" -> 60, "C" -> 70, "D" -> 80))
+      ClientState("C1", 100, Map("A" -> 10, "B" -> 20, "C" -> 30, "D" -> 40)),
+      ClientState("C2", 200, Map("A" -> 40, "B" -> 30, "C" -> 20, "D" -> 10)),
+      ClientState("C3", 300, Map("A" -> 50, "B" -> 60, "C" -> 70, "D" -> 80))
     )
 
     val orders = Seq(
@@ -44,19 +45,18 @@ class MatchingSpec(_system: ActorSystem) extends TestKit(_system)
     )
 
     val results = List(
-      Client("C1", 90, Map("A" -> 60, "B" -> 0, "C" -> 30, "D" -> 40)),
-      Client("C2", 120, Map("A" -> 40, "B" -> 50, "C" -> 20, "D" -> 30)),
-      Client("C3", 390, Map("A" -> 0, "B" -> 60, "C" -> 70, "D" -> 60))
+      ClientState("C1", 90, Map("A" -> 60, "B" -> 0, "C" -> 30, "D" -> 40)),
+      ClientState("C2", 120, Map("A" -> 40, "B" -> 50, "C" -> 20, "D" -> 30)),
+      ClientState("C3", 390, Map("A" -> 0, "B" -> 60, "C" -> 70, "D" -> 600))
     )
 
     val testProbe = TestProbe()
-    val exchangeActor = system.actorOf(Exchange.props(testProbe.ref))
+    val exchangeActor = system.actorOf(Exchange.props())
 
-    clients.map(AddClient).foreach(message => exchangeActor ! message)
-    orders.map(AddOrder).foreach(message => exchangeActor ! message)
+    clients.map(AddClient).foreach(message => testProbe.send(exchangeActor, message))
+    orders.map(AddOrder).foreach(message => testProbe.send(exchangeActor, message))
 
-    exchangeActor ! PrintClients
-
-    testProbe.expectMsg(5 seconds, PrintMessage(results))
+    testProbe.send(exchangeActor, GetAllClientsStates)
+    testProbe.expectMsg(10 seconds, results)
   }
 }

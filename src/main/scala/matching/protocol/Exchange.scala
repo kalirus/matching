@@ -1,10 +1,15 @@
-package matching
+package matching.protocol
 
 import akka.actor.{Actor, ActorRef, Props}
-import matching.ClientsPrinter.PrintMessage
-import matching.Exchange.{AddClient, AddOrder, PrintClients}
+import akka.pattern.{ask, pipe}
+import akka.util.Timeout
+import matching.protocol.Client._
+import matching.protocol.Exchange.{AddClient, AddOrder, GetAllClientsStates}
 
 import scala.collection.mutable
+import scala.concurrent.duration._
+import scala.concurrent.{ExecutionContext, Future}
+import scala.language.postfixOps
 
 /**
   * companion-object для актора [[Exchange]]
@@ -15,17 +20,16 @@ object Exchange {
   /**
     * Фабричный метод, создающий экземпляр актора и возвращающий ссылку на него
     *
-    * @param printer актор для вывода балансов клиентов
     * @return ссылка на актор
     */
-  def props(printer: ActorRef): Props = Props(new Exchange(printer))
+  def props(): Props = Props(new Exchange())
 
   /**
     * Сообщение добавления нового клиента на биржу
     *
     * @param client клиент
     */
-  final case class AddClient(client: Client)
+  final case class AddClient(client: ClientState)
 
   /**
     * Сообщение добавления новой заяки на биржу
@@ -35,52 +39,76 @@ object Exchange {
   final case class AddOrder(order: Order)
 
   /**
-    * Сообщение для вывода балансов клиентов
+    * Сообщение для получения балансов всех клиентов
     */
-  case object PrintClients
+  case object GetAllClientsStates
 
 }
 
 /**
   * Актор, моделирующий работу биржи.
   * Инкапсулирует балансы клиентов и очереди по заявкам
-  *
-  * @param printer актор для вывода балансов клиентов при получении сообщения класса [[PrintClients]]
   */
-class Exchange(printer: ActorRef) extends Actor {
+class Exchange extends Actor {
 
   /**
     * Хэш-карта, хранящая клиентов биржи.
     * Используем хэш, хранящий порядок добавления элементов, чтобы вывести клиентов в том же порядке, в котором они были добавлены на биржу.
-    * Ключ - наименование клиента, значение - экземпляр клиента.
+    * Ключ - наименование клиента, значение - экземпляр клиента (актор).
     * Так как состояние хэша изменяется только в методе [[receive]], можем позволить использовать mutable коллекцию, чтобы
     * не было большой нагрузки на garbage collector при изменениях.
     */
-  val clients: mutable.LinkedHashMap[String, Client] = new mutable.LinkedHashMap[String, Client]()
+  val clients: mutable.Map[String, ActorRef] = new mutable.LinkedHashMap[String, ActorRef]()
 
   /**
     * Хэш-карта заявок на покупку, ожидающих своей очереди.
-    * Ключ - идентификатор заявки, значение - сама заявка.
+    * Ключ - наименование ценной бумаги, значение - очередь из заявок на покупку по ней.
     * Так как состояние хэша изменяется только в методе [[receive]], можем позволить использовать mutable коллекцию, чтобы
     * не было большой нагрузки на garbage collector при изменениях.
     */
-  val unprocessedBuyOrders: mutable.LinkedHashMap[Long, Order] = new mutable.LinkedHashMap[Long, Order]()
+  val unprocessedBuyOrders: mutable.Map[String, mutable.Queue[Order]] = mutable.Map.empty[String, mutable.Queue[Order]]
 
   /**
     * Хэш-карта заявок на продажу, ожидающих своей очереди.
-    * Ключ - идентификатор заявки, значение - сама заявка.
+    * Ключ - наименование ценной бумаги, значение - очередь из заявок на продажу по ней.
     * Так как состояние хэша изменяется только в методе [[receive]], можем позволить использовать mutable коллекцию, чтобы
     * не было большой нагрузки на garbage collector при изменениях.
     */
-  val unprocessedSellOrders: mutable.LinkedHashMap[Long, Order] = new mutable.LinkedHashMap[Long, Order]()
+  val unprocessedSellOrders: mutable.Map[String, mutable.Queue[Order]] = mutable.Map.empty[String, mutable.Queue[Order]]
 
-  def receive: PartialFunction[Any, Unit] = {
+  /**
+    * Возвращает очередь с заявками на покупку для ценной бумаги
+    *
+    * @param stock наименование ценной бумаги
+    * @return очередь с заявками на покупку
+    */
+  private[this] def getStockBuyQueue(stock: String) = {
+    unprocessedBuyOrders.getOrElseUpdate(stock, new mutable.Queue[Order]())
+  }
+
+  /**
+    * Возвращает очередь с заявками на продажу для ценной бумаги
+    *
+    * @param stock наименование ценной бумаги
+    * @return очередь с заявками на продажу
+    */
+  private[this] def getStockSellQueue(stock: String) = {
+    unprocessedSellOrders.getOrElseUpdate(stock, new mutable.Queue[Order]())
+  }
+
+  override def receive: PartialFunction[Any, Unit] = {
     case AddClient(client) =>
-      clients.put(client.name, client)
+      val clientActorRef = context.actorOf(Client.props(client.name, client.balance, client.stocks))
+      clients.put(client.name, clientActorRef)
     case AddOrder(order) =>
       processOrder(order)
-    case PrintClients =>
-      printer ! PrintMessage(clients.values.toList)
+    case GetAllClientsStates =>
+      implicit val timeout: Timeout = Timeout(10 seconds)
+      implicit val ec: ExecutionContext = context.dispatcher
+      val f: List[Future[ClientState]] = for {
+        client <- clients.values.toList
+      } yield (client ? GetClientState).mapTo[ClientState]
+      pipe(Future.sequence(f)) to sender()
   }
 
   /**
@@ -89,23 +117,23 @@ class Exchange(printer: ActorRef) extends Actor {
     *
     * @param order заявка
     */
-  private def processOrder(order: Order) {
+  private[this] def processOrder(order: Order) {
     order.operation match {
       case Sell =>
-        val matched = unprocessedBuyOrders.values.find(matchOrders(_, order))
+        val queue: mutable.Queue[Order] = getStockBuyQueue(order.stock)
+        val matched = queue.dequeueFirst(matchOrders(_, order))
         if (matched.nonEmpty) {
-          processMatch(matched.get, order)
-          unprocessedBuyOrders -= matched.get.id
+          executeTransaction(matched.get, order)
         } else {
-          unprocessedSellOrders += (order.id -> order)
+          getStockSellQueue(order.stock).enqueue(order)
         }
       case Buy =>
-        val matched = unprocessedSellOrders.values.find(matchOrders(_, order))
+        val queue: mutable.Queue[Order] = getStockSellQueue(order.stock)
+        val matched = queue.dequeueFirst(matchOrders(_, order))
         if (matched.nonEmpty) {
-          processMatch(order, matched.get)
-          unprocessedSellOrders -= matched.get.id
+          executeTransaction(order, matched.get)
         } else {
-          unprocessedBuyOrders += (order.id -> order)
+          getStockBuyQueue(order.stock).enqueue(order)
         }
     }
   }
@@ -118,7 +146,7 @@ class Exchange(printer: ActorRef) extends Actor {
     * @param order2 вторая заявка
     * @return true - если заявки соответсвуют, false - иначе
     */
-  private def matchOrders(order1: Order, order2: Order): Boolean = {
+  private[this] def matchOrders(order1: Order, order2: Order): Boolean = {
     order1.stock == order2.stock && order1.price == order2.price && order1.count == order2.count && order1.client != order2.client
   }
 
@@ -128,21 +156,18 @@ class Exchange(printer: ActorRef) extends Actor {
     * @param buyOrder  заявка на покупку
     * @param sellOrder заявка на продажу
     */
-  private def processMatch(buyOrder: Order, sellOrder: Order) {
-    val count = buyOrder.count
-    val amount = buyOrder.count * buyOrder.price
-    val stock = buyOrder.stock
-
+  private[this] def executeTransaction(buyOrder: Order, sellOrder: Order) {
     val buyClient = clients(buyOrder.client)
-    val buyClientNewBalance = buyClient.balance - amount
-    val buyClientNewStocks = buyClient.stocks + (stock -> (buyClient.stocks(stock) + count))
-    val newBuyClient = buyClient.copy(balance = buyClientNewBalance, stocks = buyClientNewStocks)
-    clients += (newBuyClient.name -> newBuyClient)
-
     val sellClient = clients(sellOrder.client)
-    val sellClientNewBalance = sellClient.balance + amount
-    val sellClientNewStocks = sellClient.stocks + (stock -> (sellClient.stocks(stock) - count))
-    val newSellClient = sellClient.copy(balance = sellClientNewBalance, stocks = sellClientNewStocks)
-    clients += (newSellClient.name -> newSellClient)
+
+    val count = buyOrder.count
+    val stock = buyOrder.stock
+    val amount = buyOrder.count * buyOrder.price
+
+    buyClient ! DecreaseBalance(amount)
+    buyClient ! AddStocks(stock, count)
+
+    sellClient ! SubtractStocks(stock, count)
+    sellClient ! IncreaseBalance(amount)
   }
 }
