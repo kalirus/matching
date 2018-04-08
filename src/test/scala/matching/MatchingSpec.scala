@@ -47,7 +47,7 @@ class MatchingSpec(_system: ActorSystem) extends TestKit(_system)
     val results = List(
       ClientState("C1", 90, Map("A" -> 60, "B" -> 0, "C" -> 30, "D" -> 40)),
       ClientState("C2", 120, Map("A" -> 40, "B" -> 50, "C" -> 20, "D" -> 30)),
-      ClientState("C3", 390, Map("A" -> 0, "B" -> 60, "C" -> 70, "D" -> 600))
+      ClientState("C3", 390, Map("A" -> 0, "B" -> 60, "C" -> 70, "D" -> 60))
     )
 
     val testProbe = TestProbe()
