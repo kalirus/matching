@@ -7,12 +7,12 @@ package matching.protocol
   * @param balance баланс клиента по долларам
   * @param stocks  баланс клиента по ценным бумагам
   */
-case class ClientState(name: String, balance: Long, stocks: Map[String, Long]) {}
+case class ClientState(name: String, balance: Long, stocks: Map[String, Long])
 
 object ClientState {
 
   /** Разделитель полей при чтении объектов из текстового файла */
-  private final val delimiter: Char = '\t'
+  final val delimiter: Char = '\t'
 
   /**
     * Создает объект состояния клиента биржа из его текстового представления в виде строки
@@ -36,10 +36,11 @@ object ClientState {
   /**
     * Представляет состояние клиента в виде строки данных, совместимой с методом [[fromString()]]
     *
-    * @param client состояние клиента биржи
+    * @param clientState состояние клиента биржи
     * @return строка данных
     */
-  def stringify(client: ClientState): String = {
-    s"${client.name}$delimiter${client.balance}$delimiter${client.stocks("A")}$delimiter${client.stocks("B")}$delimiter${client.stocks("C")}$delimiter${client.stocks("D")}"
+  def stringify(clientState: ClientState): String = {
+    val values = Array(clientState.name, clientState.balance, clientState.stocks("A"), clientState.stocks("B"), clientState.stocks("C"), clientState.stocks("D"))
+    values.mkString(delimiter.toString)
   }
 }

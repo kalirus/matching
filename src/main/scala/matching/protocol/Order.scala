@@ -17,7 +17,7 @@ case class Order(id: Long, client: String, operation: Operation, stock: String, 
 object Order {
 
   /** Разделитель полей при чтении заявок из текстового файла */
-  private final val delimiter: Char = '\t'
+  final val delimiter: Char = '\t'
 
   /** Генератор идентификаторов для заявок */
   private final val idGenerator: AtomicLong = new AtomicLong()
